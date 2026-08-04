@@ -25,8 +25,7 @@ COPY enjoy/package.json ./enjoy/package.json
 COPY 1000-hours/package.json ./1000-hours/package.json
 COPY 1000h-portal/package.json ./1000h-portal/package.json
 
-# workspaces focus 需要额外插件
-RUN yarn plugin import workspace-tools
+# yarn 4.6.0 已经内置 workspace-tools 插件,不需要再手动 import
 RUN yarn workspaces focus 1000h-portal
 
 # ---------- 2. 构建 ----------

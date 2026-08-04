@@ -134,8 +134,9 @@ ssh -i ~/.ssh/gh_actions_1000h_portal <用户名>@<服务器IP> "echo ok"
 2. **为什么只 `COPY` 各个 workspace 的 `package.json`,不直接 `COPY .` 整个仓库?**
    这是 Docker 分层缓存的经典技巧：只要 `package.json`/`yarn.lock` 没变,`yarn install` 这一层就能复用缓存,不用每次改一行 Vue 代码就重新装一遍依赖,能把 CI 时间从几分钟压缩到几十秒。
 
-3. **为什么要 `yarn plugin import workspace-tools` 然后用 `yarn workspaces focus 1000h-portal`,而不是直接 `yarn install`?**
+3. **为什么用 `yarn workspaces focus 1000h-portal`,而不是直接 `yarn install`?**
    仓库里还有个 `enjoy` workspace(Electron 桌面客户端),它依赖 `sqlite3`、`ffmpeg-static` 这类需要原生编译的包。如果直接在根目录 `yarn install`,会把 `enjoy` 的依赖也一起装了,既慢又容易在容器里编译失败。`workspaces focus` 只安装目标 workspace 真正需要的依赖。
+   (`workspaces focus` 依赖 `@yarnpkg/plugin-workspace-tools` 这个功能,一开始我们多写了一行 `yarn plugin import workspace-tools` 手动装它,结果第一次跑 CI 就报错——因为 yarn 4.6.0 已经把这个插件内置了,再手动 import 反而报错退出。这是我们实际踩过的一个坑,已经在 Dockerfile 里去掉了那一行,留着当反面例子:遇到构建报错,先看报错原文,`already installed` 这种字眼往往意味着"这一步根本不需要做"。)
 
 4. **三段式构建(`base` → `deps`/`build` → `runtime`)图的是什么?**
    最终跑在服务器上的镜像只保留 `runtime` 阶段的内容(基础 Node 镜像 + 编译产物),构建过程中用到的 `node_modules`、源码、构建工具全部不会进入最终镜像,镜像体积小很多,攻击面也小。
