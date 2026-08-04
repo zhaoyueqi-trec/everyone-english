@@ -11,7 +11,7 @@ services:
     container_name: 1000h-portal
     restart: unless-stopped
     ports:
-      - "${HOST_PORT:-3000}:3000"
+      - "${HOST_PORT:-8100}:3000"
     environment:
       NODE_ENV: production
       PORT: 3000

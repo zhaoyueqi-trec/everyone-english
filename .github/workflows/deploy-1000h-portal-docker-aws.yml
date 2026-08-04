@@ -74,7 +74,7 @@ jobs:
           mkdir -p deploy-artifact
           cat > deploy-artifact/.env <<EOF
           IMAGE=${{ env.REGISTRY }}/${{ needs.build-and-push.outputs.image_repo }}:${{ needs.build-and-push.outputs.image_tag }}
-          HOST_PORT=3000
+          HOST_PORT=8100
           EOF
           cp 1000h-portal/deploy/docker-compose.yml deploy-artifact/docker-compose.yml
 
@@ -113,7 +113,7 @@ jobs:
             echo "等待容器启动..."
             sleep 3
 
-            if curl -fsS http://localhost:3000 > /dev/null; then
+            if curl -fsS http://localhost:8100 > /dev/null; then
               echo "健康检查通过,部署成功"
             else
               echo "健康检查失败,打印最近日志:"

@@ -89,6 +89,6 @@ fi
 echo ""
 echo "== 完成 =="
 echo "接下来手动确认:"
-echo "1. AWS 安全组(Security Group)已经放行入站 TCP 3000 端口(学习阶段先只对你自己的 IP 开放更安全)"
+echo "1. AWS 安全组(Security Group)已经放行入站 TCP 8100 端口(学习阶段先只对你自己的 IP 开放更安全)"
 echo "2. 把这台服务器的公网 IP / SSH 用户名 / SSH 私钥配置进 GitHub 仓库 Settings -> Secrets and variables -> Actions"
 echo "3. 回到 GitHub 仓库,手动触发一次 'Deploy 1000h-portal (Docker to AWS)' workflow,完成首次部署"

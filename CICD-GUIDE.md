@@ -84,9 +84,11 @@ bash aws-server-setup.sh
 
 | 类型 | 协议 | 端口范围 | 来源 |
 |---|---|---|---|
-| 自定义 TCP | TCP | 3000 | 学习阶段建议先填你自己的公网 IP(`你的IP/32`),而不是 `0.0.0.0/0` |
+| 自定义 TCP | TCP | 8100 | 学习阶段建议先填你自己的公网 IP(`你的IP/32`),而不是 `0.0.0.0/0` |
 
 `22` 端口(SSH)应该已经开放了,不用动。
+
+> 宿主机端口选了 `8100` 而不是常见的 `3000`,是因为这台服务器上已经跑着 huaxia-qiji(内部用了 3000/8000/5432,虽然目前没绑定到宿主机),用一个不容易撞车的端口,以后再加别的项目也不用每次翻文档确认"3000 到底是谁在用"。容器**内部** Nuxt 还是监听它自己默认的 3000 端口,只是对外映射的宿主机端口换成了 8100,这个改动只影响 `docker-compose.yml` 里的端口映射,不需要改 Nuxt 应用代码。
 
 ### 2.3 生成一把"只给部署用"的 SSH 密钥
 
@@ -143,9 +145,9 @@ ssh -i ~/.ssh/gh_actions_1000h_portal <用户名>@<服务器IP> "echo ok"
 ```bash
 cd everyone-english   # 仓库根目录
 docker build -f 1000h-portal/Dockerfile -t 1000h-portal:test .
-docker run --rm -p 3000:3000 1000h-portal:test
+docker run --rm -p 8100:3000 1000h-portal:test
 # 另开一个终端
-curl http://localhost:3000
+curl http://localhost:8100
 ```
 
 ---
@@ -172,9 +174,9 @@ curl http://localhost:3000
 4. 点进这次运行,展开 `build-and-push` 和 `deploy` 两个 job 的日志,跟着看每一步。
 5. 跑完之后,在你自己电脑上验证：
    ```bash
-   curl http://<服务器公网IP>:3000
+   curl http://<服务器公网IP>:8100
    ```
-   或者浏览器直接打开 `http://<服务器公网IP>:3000`。
+   或者浏览器直接打开 `http://<服务器公网IP>:8100`。
 
 ---
 
@@ -199,7 +201,7 @@ curl http://localhost:3000
 | SSH 能连,但 `docker` 命令报 `permission denied` | 部署用的用户不在 docker 组 | 重新执行 `scripts/aws-server-setup.sh`,然后**必须重新 SSH 登录一次**权限才生效 |
 | `docker compose pull` 报 `unauthorized`/`denied` | `docker login ghcr.io` 没成功,或者镜像包(package)权限有问题 | 去 GitHub 仓库页面 → 右侧 `Packages` 里检查这个包的可见性/权限设置 |
 | 健康检查 `curl` 失败,workflow 在最后一步报错 | 容器起来了但应用没监听成功,或者监听的端口/HOST 不对 | 日志里已经打印了 `docker compose logs --tail=100`,直接看容器内部报了什么错;也可以 SSH 上去手动 `docker compose logs -f` 实时看 |
-| 浏览器打不开,但服务器上 `curl localhost:3000` 是通的 | 安全组没放行,或者你输入的是内网 IP | 检查第 2.2 节的安全组规则,确认用的是公网 IP |
+| 浏览器打不开,但服务器上 `curl localhost:8100` 是通的 | 安全组没放行,或者你输入的是内网 IP | 检查第 2.2 节的安全组规则,确认用的是公网 IP |
 
 ---
 
@@ -224,7 +226,7 @@ docker compose up -d
 
 ## 9. 学明白之后可以自己练的进阶方向
 
-- **加一层 Nginx 反向代理 + HTTPS**:现在是直接把容器的 3000 端口暴露给公网,生产环境更常见的做法是用 Nginx(或 Caddy)做反向代理,配 Let's Encrypt 证书,只对外暴露 443。
+- **加一层 Nginx 反向代理 + HTTPS**:现在是直接把宿主机 8100 端口(映射到容器内部的 3000)暴露给公网,生产环境更常见的做法是用 Nginx(或 Caddy)做反向代理,配 Let's Encrypt 证书,只对外暴露 443,这台机器上 huaxia-qiji 的 nginx 已经占了 80/443,以后要给 1000h-portal 也配反代和域名,需要在 nginx 配置里按域名/路径分流到不同后端,而不是两个项目抢同一个 443。
 - **多环境(staging / production)**:复制一份 workflow,加一个 staging 分支触发部署到另一台测试服务器,验证没问题再手动 approve 部署到生产。GitHub Actions 的 `environment` + 保护规则(需要人工审批)可以练一下。
 - **零停机 / 蓝绿部署**:现在 `docker compose up -d` 重启容器的瞬间会有几秒钟服务不可用,可以研究一下怎么先起新容器、健康检查通过后再切流量、最后再关旧容器。
 - **告警**:部署失败时通过钉钉机器人/Slack/邮件通知自己,而不是要主动去 Actions 页面看。
