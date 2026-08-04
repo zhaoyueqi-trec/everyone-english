@@ -3,7 +3,7 @@ export default defineNuxtConfig({
   devtools: { enabled: true },
   css: ["~/styles/main.css"],
   site: {
-    url: "https://example.com",
+    url: "https://5ways.duckdns.org/every1english/",
     name: "Enjoy App",
     description: "Welcome to Enjoy App!",
     tagline: "",
@@ -11,6 +11,9 @@ export default defineNuxtConfig({
   },
 
   app: {
+    // 部署在 https://5ways.duckdns.org/every1english/ 这个子路径下,
+    // 没有这个配置的话页面内部资源/路由都会按域名根路径算,直接 404。
+    baseURL: "/every1english/",
     buildAssetsDir: "portal-assets",
     head: {
       viewport:
