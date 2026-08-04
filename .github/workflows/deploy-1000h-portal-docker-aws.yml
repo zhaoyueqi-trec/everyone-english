@@ -1,0 +1,122 @@
+name: Deploy 1000h-portal (Docker to AWS)
+
+on:
+  workflow_dispatch: {} # 允许在 GitHub Actions 页面手动点按钮触发,方便学习/调试
+  push:
+    branches: [main]
+    paths:
+      - "1000h-portal/**"
+      - ".github/workflows/deploy-1000h-portal-docker-aws.yml"
+
+# 同一时间只跑一次部署,新的一次会取消还在排队的旧的一次,避免互相打架。
+concurrency:
+  group: deploy-1000h-portal-docker-aws
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write # 需要这个权限才能把镜像推到 ghcr.io
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # ---------- 阶段一:构建镜像并推送到 GitHub Container Registry ----------
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      image_repo: ${{ steps.meta.outputs.repo_lower }}
+      image_tag: ${{ steps.meta.outputs.sha_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 计算镜像名和 tag
+        id: meta
+        run: |
+          REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "repo_lower=$REPO_LOWER" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=1000h-portal-$SHORT_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: . # 用仓库根目录做 build context,原因见 Dockerfile 顶部注释
+          file: 1000h-portal/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.repo_lower }}:${{ steps.meta.outputs.sha_tag }}
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.repo_lower }}:1000h-portal-latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---------- 阶段二:SSH 到 AWS 服务器,拉取新镜像并重启容器 ----------
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 生成本次部署用的 .env
+        run: |
+          mkdir -p deploy-artifact
+          cat > deploy-artifact/.env <<EOF
+          IMAGE=${{ env.REGISTRY }}/${{ needs.build-and-push.outputs.image_repo }}:${{ needs.build-and-push.outputs.image_tag }}
+          HOST_PORT=3000
+          EOF
+          cp 1000h-portal/deploy/docker-compose.yml deploy-artifact/docker-compose.yml
+
+      - name: 把 docker-compose.yml / .env 传到服务器
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.AWS_HOST }}
+          username: ${{ secrets.AWS_SSH_USER }}
+          key: ${{ secrets.AWS_SSH_KEY }}
+          port: ${{ secrets.AWS_SSH_PORT || 22 }}
+          source: "deploy-artifact/docker-compose.yml,deploy-artifact/.env"
+          target: "~/apps/1000h-portal"
+          strip_components: 1
+
+      - name: 在服务器上拉取新镜像并重启容器
+        uses: appleboy/ssh-action@v1
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        with:
+          host: ${{ secrets.AWS_HOST }}
+          username: ${{ secrets.AWS_SSH_USER }}
+          key: ${{ secrets.AWS_SSH_KEY }}
+          port: ${{ secrets.AWS_SSH_PORT || 22 }}
+          envs: GHCR_TOKEN,GHCR_USER
+          script: |
+            set -e
+            cd ~/apps/1000h-portal
+
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+
+            docker compose pull
+            docker compose up -d
+            docker image prune -f
+
+            echo "等待容器启动..."
+            sleep 3
+
+            if curl -fsS http://localhost:3000 > /dev/null; then
+              echo "健康检查通过,部署成功"
+            else
+              echo "健康检查失败,打印最近日志:"
+              docker compose logs --tail=100
+              exit 1
+            fi

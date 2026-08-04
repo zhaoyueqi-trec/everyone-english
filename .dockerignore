@@ -1,0 +1,26 @@
+# 减小发给 Docker daemon 的 build context 体积,加快构建速度。
+.git
+.github
+
+**/node_modules
+**/.output
+**/.nuxt
+**/.nitro
+**/dist
+**/.cache
+
+# enjoy 是 Electron 客户端,构建 1000h-portal 镜像用不到它的源码,
+# Dockerfile 只会拷贝它的 package.json。
+enjoy/src
+enjoy/e2e
+enjoy/samples
+enjoy/snapshots
+enjoy/assets
+
+# 大体积、和 1000h-portal 部署无关的内容
+new-edition-drafts
+book/files
+book/images
+
+*.md
+!README.md

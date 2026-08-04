@@ -1,0 +1,23 @@
+# 部署在 AWS 服务器上的 docker-compose 文件。
+# GitHub Actions 每次部署时会把这个文件和自动生成的 .env 一起
+# 上传到服务器的 ~/apps/1000h-portal/ 目录,然后执行:
+#   docker compose pull && docker compose up -d
+#
+# 本地也可以直接用它来手动验证:
+#   IMAGE=ghcr.io/xxx/xxx:1000h-portal-latest docker compose up -d
+services:
+  portal:
+    image: ${IMAGE}
+    container_name: 1000h-portal
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOST: 0.0.0.0
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
