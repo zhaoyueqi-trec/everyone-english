@@ -19,6 +19,10 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
+  # Lightsail 实例所在区域和实例名,用于动态开关 22 端口的临时白名单。
+  # 实例名不对的话去 Lightsail 控制台实例详情页确认,通常显示在页面标题里。
+  AWS_REGION: ap-northeast-1
+  LIGHTSAIL_INSTANCE_NAME: Ubuntu-1
 
 jobs:
   # ---------- 阶段一:构建镜像并推送到 GitHub Container Registry ----------
@@ -78,6 +82,39 @@ jobs:
           EOF
           cp 1000h-portal/deploy/docker-compose.yml deploy-artifact/docker-compose.yml
 
+      - name: 配置 AWS 凭证
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: 临时把本次 runner 的公网 IP 加入 22 端口白名单
+        run: |
+          set -e
+          RUNNER_IP=$(curl -4 -fsS https://api.ipify.org)
+          echo "本次 GitHub Actions runner 出口 IP: $RUNNER_IP"
+
+          # 保存当前完整防火墙规则(不含 state 字段,put 命令不接受这个字段),
+          # 部署结束后不管成功失败都会用这份原始快照原样恢复,不会残留任何改动。
+          aws lightsail get-instance-port-states \
+            --instance-name "${{ env.LIGHTSAIL_INSTANCE_NAME }}" \
+            --query 'portStates' \
+            | jq 'map(del(.state))' > original-ports.json
+
+          # 在原有规则基础上,只给 22 端口追加这次 runner 的 IP,其余规则原样保留。
+          jq --arg ip "${RUNNER_IP}/32" \
+            'map(if .fromPort == 22 and .toPort == 22 and .protocol == "tcp"
+                 then .cidrs += [$ip]
+                 else . end)' \
+            original-ports.json > opened-ports.json
+
+          aws lightsail put-instance-public-ports \
+            --instance-name "${{ env.LIGHTSAIL_INSTANCE_NAME }}" \
+            --port-infos "$(cat opened-ports.json)"
+
+          echo "已临时放行 $RUNNER_IP 访问 22 端口"
+
       - name: 把 docker-compose.yml / .env 传到服务器
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -120,3 +157,15 @@ jobs:
               docker compose logs --tail=100
               exit 1
             fi
+
+      - name: 撤销临时白名单,恢复防火墙原状
+        if: always() # 前面任何一步失败也必须执行这一步,不能留下临时开放的口子
+        run: |
+          if [ -f original-ports.json ]; then
+            aws lightsail put-instance-public-ports \
+              --instance-name "${{ env.LIGHTSAIL_INSTANCE_NAME }}" \
+              --port-infos "$(cat original-ports.json)"
+            echo "已恢复防火墙到部署前的状态"
+          else
+            echo "没有找到防火墙快照文件,说明前面开白名单那一步都没跑到,不需要恢复"
+          fi

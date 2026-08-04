@@ -122,6 +122,79 @@ ssh -i ~/.ssh/gh_actions_1000h_portal <用户名>@<服务器IP> "echo ok"
 
 `GITHUB_TOKEN` 不用你手动配置,GitHub Actions 每次运行都会自动生成一个,workflow 里直接用 `secrets.GITHUB_TOKEN` 就行——这个 token 既用来把镜像推到 ghcr.io,也会在部署那一步临时传到服务器上做 `docker login`(它是随这次 workflow 运行临时生成、跑完就失效的,不是长期有效的密码,所以不用担心它被服务器"记住"造成长期风险)。
 
+只加上面这四个还不够——第一次实际跑通整条流水线时会在 SCP 那一步卡住报错,原因和解决办法见下一节。
+
+### 2.5 让 GitHub Actions 能连上服务器的 22 端口(动态 IP 白名单)
+
+之前把 SSH 22 端口锁定成"只允许自己当前的公网 IP",是为了防止扫描/暴力破解。但 GitHub Actions 部署时,真正发起 SSH 连接的是 **GitHub 云端的 runner**,它的出口 IP 是每次运行随机分配的,根本不在你的白名单里——第一次实际跑这条流水线时就踩到了这个坑,报错是：
+
+```
+error copy file to dest: ***, error message: dial tcp ***:22: i/o timeout
+```
+
+解决办法:workflow 里新增两步——部署前先查出这次 runner 的公网 IP,临时追加进 Lightsail 防火墙的 22 端口白名单(不影响你原来那两条固定 IP 的规则,只是多加一条);部署结束后不管成功还是失败,最后都会把这条临时规则撤销,恢复到部署前的状态。整个过程全自动,不需要你每次手动去控制台加/删 IP。
+
+这需要让 GitHub Actions 有权限调用 AWS API 去改防火墙规则,所以要专门建一个权限收得很窄的 IAM 用户,只干这一件事。
+
+#### 2.5.1 创建 IAM 权限策略
+
+AWS 控制台 → **IAM** → **Policies** → **Create policy** → 切到 **JSON** 标签,贴入：
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "lightsail:GetInstancePortStates",
+        "lightsail:PutInstancePublicPorts"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+> 这个策略只允许"查看/修改端口开放状态"这一件事,没有创建/删除实例、没有读数据、没有任何别的权限。`Resource: "*"` 图省事覆盖了这个账号下所有 Lightsail 实例,更严谨的做法是把 `Resource` 收紧成只对这一台实例的 ARN 生效(格式 `arn:aws:lightsail:<region>:<account-id>:Instance/<instance-name>`),可以作为后续练习自己收紧,不影响现在先跑通。
+
+起个名字,比如 `1000h-portal-github-actions-firewall`,创建。
+
+#### 2.5.2 创建 IAM 用户,绑定这个策略
+
+AWS 控制台 → **IAM** → **Users** → **Create user**：
+- User name:比如 `github-actions-1000h-portal`
+- **不要**勾选 "Provide user access to the AWS Management Console"——这个用户只给程序调 API 用,不需要能登录网页控制台
+- 权限这一步选 **Attach policies directly**,勾选刚才创建的 `1000h-portal-github-actions-firewall`
+- 创建完成
+
+#### 2.5.3 生成访问密钥
+
+进这个新用户的详情页 → **Security credentials** 标签 → **Access keys** 区块 → **Create access key**：
+- Use case 选跟"第三方程序 / AWS 外部的应用访问"最接近的那个选项(不同界面版本文案略有差异)
+- 创建完成后会显示一次性的 **Access key ID** 和 **Secret access key**——**这是唯一一次能看到 Secret access key 的机会,页面关掉就再也看不到了**,先别关,接着做下一步。
+
+#### 2.5.4 添加到 GitHub Secrets
+
+**这两个值不要粘贴到咱们的对话里**,直接在你自己电脑的终端操作(这台电脑的 `gh` 命令行工具已经登录好了)：
+
+```bash
+gh secret set AWS_ACCESS_KEY_ID --repo zhaoyueqi-trec/everyone-english
+# 会提示你输入值,把 Access key ID 粘贴进去回车
+
+gh secret set AWS_SECRET_ACCESS_KEY --repo zhaoyueqi-trec/everyone-english
+# 同样,把 Secret access key 粘贴进去回车
+```
+
+或者走网页 `Settings → Secrets and variables → Actions → New repository secret`,跟之前加 `AWS_HOST` 那几个操作一样,只是这次多加这两个：
+
+| Secret 名 | 值 |
+|---|---|
+| `AWS_ACCESS_KEY_ID` | IAM 用户的 Access key ID |
+| `AWS_SECRET_ACCESS_KEY` | IAM 用户的 Secret access key |
+
+加完之后,回到还开着的 AWS 控制台页面,点 **Done** 关掉就行(密钥已经不需要再对着网页抄一遍了)。
+
 ---
 
 ## 3. 看懂 Dockerfile
@@ -164,6 +237,8 @@ curl http://localhost:8100
 - `build-and-push` job 用 `docker/build-push-action` 构建并推送,`cache-from/cache-to: type=gha` 是让 Docker 的构建缓存存在 GitHub Actions 自己的缓存里,下次构建能复用,加快速度。
 - `deploy` job 通过 `needs: build-and-push` 声明依赖关系,保证一定是"镜像先推送成功,再去部署",两个 job 之间还通过 `outputs` 把镜像名和 tag 传递过去。
 - 部署用了两个第三方 action：`appleboy/scp-action`(传文件)和 `appleboy/ssh-action`(远程执行命令),这是社区里做"SSH 部署"最常用的两个 action。
+- `deploy` job 最开始的"配置 AWS 凭证" + "临时把本次 runner 的公网 IP 加入 22 端口白名单"这两步,对应第 2.5 节讲的问题:GitHub Actions 的出口 IP 不固定,得在部署前先临时开白名单。这一步用 `aws lightsail get-instance-port-states` 读出当前完整的防火墙规则存成快照,再用 `jq` 只给 22 端口那一条追加这次 runner 的 IP,其余规则原样不动,最后 `aws lightsail put-instance-public-ports` 写回去——`put` 这个 API 是整体覆盖式的(不是"追加一条"），所以必须先读全量、改一小块、再整体写回,不能只传一条新规则上去,不然会把其他规则全部冲掉。
+- 最后一步"撤销临时白名单,恢复防火墙原状"用了 `if: always()`,意思是不管前面哪一步失败,这一步都会执行——保证不会因为部署中途报错就永久留下一个对外网开放的 22 端口漏洞。
 
 ---
 
@@ -199,6 +274,7 @@ curl http://localhost:8100
 |---|---|---|
 | `build-and-push` 阶段失败,`yarn install`/构建报错 | 依赖装不上,或代码本身编译报错 | 先在本地按第 3 节的方法手动 `docker build` 一遍复现 |
 | `scp-action`/`ssh-action` 报连接失败 | Secrets 配错了,或安全组没开 22 端口,或私钥格式不对 | 用本机 `ssh -i <私钥文件> <用户>@<IP>` 手动连一次,确认没问题再检查 Secrets 是不是完整复制(包含 BEGIN/END 行) |
+| 报错 `dial tcp ***:22: i/o timeout` | 22 端口白名单没放行 GitHub Actions runner 这次的出口 IP | 确认第 2.5 节的 `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` 加了没有,以及 IAM 用户权限、`LIGHTSAIL_INSTANCE_NAME` 是否和实际实例名一致;也可以去日志里看"临时把本次 runner 的公网 IP 加入 22 端口白名单"这一步有没有报错 |
 | SSH 能连,但 `docker` 命令报 `permission denied` | 部署用的用户不在 docker 组 | 重新执行 `scripts/aws-server-setup.sh`,然后**必须重新 SSH 登录一次**权限才生效 |
 | `docker compose pull` 报 `unauthorized`/`denied` | `docker login ghcr.io` 没成功,或者镜像包(package)权限有问题 | 去 GitHub 仓库页面 → 右侧 `Packages` 里检查这个包的可见性/权限设置 |
 | 健康检查 `curl` 失败,workflow 在最后一步报错 | 容器起来了但应用没监听成功,或者监听的端口/HOST 不对 | 日志里已经打印了 `docker compose logs --tail=100`,直接看容器内部报了什么错;也可以 SSH 上去手动 `docker compose logs -f` 实时看 |
