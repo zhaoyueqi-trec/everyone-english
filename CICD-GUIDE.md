@@ -301,9 +301,36 @@ docker compose up -d
 
 ---
 
+## 8.5 最终访问地址:和 huaxia-qiji 共用一个域名、按路径分流
+
+8100 那个端口一开始是为了绕开"公司网络不让访问非常规端口"这个问题,但更彻底的解法是接到已有的 HTTPS 域名上,所以最终线上正式地址是：
+
+```
+https://5ways.duckdns.org/every1english/
+```
+
+`5ways.duckdns.org` 是专门给"huaxia-qiji 之外的其它小项目"用的统一入口,不是 1000h-portal 独占的域名——以后再加新服务,只需要在服务器的 `~/huaxia-qiji/nginx.conf` 里新增一个 `location` 路径块,不需要再注册新域名、再申请新证书。8100 端口现在仍然保留着(方便本机/服务器内部直接测试),但对外应该用上面这个域名访问。
+
+这一步涉及到的改动都不在这个仓库里能看到(nginx 是 huaxia-qiji 那台服务器上的公共基础设施,配置文件在服务器上,不在 `everyone-english` 这个仓库的版本控制范围内),记录一下方便以后排查：
+
+- 服务器上 `~/huaxia-qiji/nginx.conf` 新增了 `5ways.duckdns.org` 的 80跳转 + 443 SSL 两个 `server` 块,`xue5ya.duckdns.org` 原有的配置块完全没动。
+- 证书是用 **DNS 验证**(不是 huaxia-qiji 当初用的 standalone 方式)申请的,好处是申请/续期全程不需要占用 80 端口、不需要停 nginx。对应的钩子脚本在服务器的 `~/duckdns/certbot-auth-hook.sh` / `certbot-cleanup-hook.sh`,复用了 `~/duckdns/duck.sh` 里已有的 DuckDNS token。
+- `1000h-portal` 容器接入了 huaxia-qiji 的 Docker 网络(`huaxia-qiji_huaxia_network_dev`),这样 nginx 才能直接用容器名 `1000h-portal` 访问到它——这层网络关系写在了本仓库 `1000h-portal/deploy/docker-compose.yml` 的 `networks` 配置里(见下面"踩过的坑"第一条,为什么必须写在这里而不是手动 `docker network connect` 一次就完事)。
+
+### 踩过的两个坑(真实发生过,留着当反面教材)
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| 手动 `docker network connect` 接好网络后,下一次自动部署(push 触发 CI/CD)一跑,nginx 疯狂重启,日志报 `host not found in upstream "1000h-portal"` | `docker compose up -d` 重建容器时,只认容器自己 compose 文件里声明的网络,不知道有一条手动加的网络关系,重建的新容器就把这层连接丢了 | 把这层网络关系**写进 `1000h-portal/deploy/docker-compose.yml` 的 `networks` 里**(声明成 `external: true` 指向 huaxia-qiji 那个真实网络名),让它成为每次部署都会被应用的"永久配置",而不是一次性的手动操作 |
+| nginx 配置改成按路径转发之后,访问 `/every1english/` 应用返回的是 Nuxt 自己的 404 页面(不是 nginx 层面的错误) | Nuxt 配了 `app.baseURL: '/every1english/'` 之后,应用**期望收到的请求路径里带着这个前缀**去做内部路由匹配;但 nginx 的 `proxy_pass http://1000h-portal:3000/;`(结尾带斜杠)会把这个前缀转发前**剥掉**,导致应用收到的是不带前缀的路径,匹配不到任何路由 | 把 `proxy_pass` 结尾的 `/` 去掉,变成 `proxy_pass http://1000h-portal:3000;`(不带斜杠),nginx 就会把请求原始路径(含 `/every1english/` 前缀)原样转发给应用,交给应用自己按 `baseURL` 内部处理 |
+
+这两个坑本质上是同一类问题的两种表现:**"手动在服务器上改了一下、看着好使了"和"这个改动能不能扛住下一次自动化部署/配置变更"是两回事**,验证的时候一定要连着"再触发一次真实的自动部署"一起测,不能改完手动测一次就当结束了。
+
+---
+
 ## 9. 学明白之后可以自己练的进阶方向
 
-- **加一层 Nginx 反向代理 + HTTPS**:现在是直接把宿主机 8100 端口(映射到容器内部的 3000)暴露给公网,生产环境更常见的做法是用 Nginx(或 Caddy)做反向代理,配 Let's Encrypt 证书,只对外暴露 443,这台机器上 huaxia-qiji 的 nginx 已经占了 80/443,以后要给 1000h-portal 也配反代和域名,需要在 nginx 配置里按域名/路径分流到不同后端,而不是两个项目抢同一个 443。
+- ~~加一层 Nginx 反向代理 + HTTPS~~ **已完成**,见第 8.5 节:复用 huaxia-qiji 现有的 nginx,新增了 `5ways.duckdns.org` 这个域名按路径分流,`1000h-portal` 落在 `/every1english/` 这个路径下,证书用 DNS 验证申请、不占 80 端口。以后再加新服务,照着同样的模式在 nginx 里加一个新 `location` 路径就行,不用再申请新域名/新证书——这个"一个域名多路径"的模式已经是这台服务器上的既定架构,可以直接复用。
 - **多环境(staging / production)**:复制一份 workflow,加一个 staging 分支触发部署到另一台测试服务器,验证没问题再手动 approve 部署到生产。GitHub Actions 的 `environment` + 保护规则(需要人工审批)可以练一下。
 - **零停机 / 蓝绿部署**:现在 `docker compose up -d` 重启容器的瞬间会有几秒钟服务不可用,可以研究一下怎么先起新容器、健康检查通过后再切流量、最后再关旧容器。
 - **告警**:部署失败时通过钉钉机器人/Slack/邮件通知自己,而不是要主动去 Actions 页面看。

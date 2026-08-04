@@ -150,7 +150,9 @@ jobs:
             echo "等待容器启动..."
             sleep 3
 
-            if curl -fsS http://localhost:8100 > /dev/null; then
+            # 应用配了 baseURL=/every1english/,访问裸根路径现在会 404,
+            # 属于预期行为(2026-08-04 实测踩过一次坑),健康检查要带上这个路径。
+            if curl -fsS http://localhost:8100/every1english/ > /dev/null; then
               echo "健康检查通过,部署成功"
             else
               echo "健康检查失败,打印最近日志:"

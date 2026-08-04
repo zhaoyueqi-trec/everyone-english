@@ -21,3 +21,17 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    networks:
+      - default
+      - shared-nginx
+
+networks:
+  default: {}
+  # huaxia-qiji 的 nginx 通过这个网络按容器名(1000h-portal)反代到这里,
+  # 域名/路径是 https://5ways.duckdns.org/every1english/ ,配置在服务器上
+  # ~/huaxia-qiji/nginx.conf 里。这里必须显式声明,否则每次 `docker compose
+  # up -d` 重建容器时会丢掉这层网络关系,导致 nginx 解析不到这个容器名而崩溃重启
+  # (2026-08-04 实测踩过这个坑)。
+  shared-nginx:
+    external: true
+    name: huaxia-qiji_huaxia_network_dev
