@@ -41,7 +41,7 @@ GitHub Actions 触发 workflow
              4. curl 本机检查服务是否正常响应,不正常就打印日志并让整个 job 失败
 ```
 
-**为什么部署时用 sha tag 而不是 latest?** `latest` 只是个可变的指针,今天指向的镜像和明天指向的可能不是同一个。用 `1000h-portal-<sha>` 这种不可变 tag,你随时能说清楚"服务器上现在跑的到底是哪一次 commit 构建出来的",出问题也方便回滚到某个具体版本(见第 8 节)。`latest` 保留下来只是方便你本地手动 `docker pull` 尝鲜。
+**为什么部署时用 sha tag 而不是 latest?** `latest` 只是个可变的指针,今天指向的镜像和明天指向的可能不是同一个。用 `1000h-portal-<sha>` 这种不可变 tag,你随时能说清楚"服务器上现在跑的到底是哪一次 commit 构建出来的",出问题也方便回滚到某个具体版本(见第 9 节)。`latest` 保留下来只是方便你本地手动 `docker pull` 尝鲜。
 
 **为什么 Nuxt 应用的运行时镜像里没有 node_modules?** Nuxt3 的 Nitro 服务端引擎默认用 `node-server` 预设构建,产物 `.output/server` 是"自包含"的——构建时用到的依赖会被打包进去,运行时镜像只需要 `node .output/server/index.mjs` 就能跑,不需要再装一遍依赖。这也是为什么最终镜像能做得很小。
 
@@ -220,8 +220,9 @@ gh secret set AWS_SECRET_ACCESS_KEY --repo zhaoyueqi-trec/everyone-english
 cd everyone-english   # 仓库根目录
 docker build -f 1000h-portal/Dockerfile -t 1000h-portal:test .
 docker run --rm -p 8100:3000 1000h-portal:test
-# 另开一个终端
-curl http://localhost:8100
+# 另开一个终端。注意路径带上 /every1english/ ——应用配了 app.baseURL,
+# 裸根路径 / 会 404,这不是构建出问题了,原因见第 8 节。
+curl http://localhost:8100/every1english/
 ```
 
 ---
@@ -250,9 +251,9 @@ curl http://localhost:8100
 4. 点进这次运行,展开 `build-and-push` 和 `deploy` 两个 job 的日志,跟着看每一步。
 5. 跑完之后,在你自己电脑上验证：
    ```bash
-   curl http://<服务器公网IP>:8100
+   curl http://<服务器公网IP>:8100/every1english/
    ```
-   或者浏览器直接打开 `http://<服务器公网IP>:8100`。
+   或者浏览器直接打开 `http://<服务器公网IP>:8100/every1english/`(注意带上路径,裸根路径会 404,原因见第 8 节)。配好第 8 节的域名之后,更推荐直接访问 `https://5ways.duckdns.org/every1english/`,不依赖 8100 这个端口能不能从你当前网络连通。
 
 ---
 
@@ -278,11 +279,163 @@ curl http://localhost:8100
 | SSH 能连,但 `docker` 命令报 `permission denied` | 部署用的用户不在 docker 组 | 重新执行 `scripts/aws-server-setup.sh`,然后**必须重新 SSH 登录一次**权限才生效 |
 | `docker compose pull` 报 `unauthorized`/`denied` | `docker login ghcr.io` 没成功,或者镜像包(package)权限有问题 | 去 GitHub 仓库页面 → 右侧 `Packages` 里检查这个包的可见性/权限设置 |
 | 健康检查 `curl` 失败,workflow 在最后一步报错 | 容器起来了但应用没监听成功,或者监听的端口/HOST 不对 | 日志里已经打印了 `docker compose logs --tail=100`,直接看容器内部报了什么错;也可以 SSH 上去手动 `docker compose logs -f` 实时看 |
-| 浏览器打不开,但服务器上 `curl localhost:8100` 是通的 | 安全组没放行,或者你输入的是内网 IP | 检查第 2.2 节的安全组规则,确认用的是公网 IP |
+| 浏览器打不开,但服务器上 `curl localhost:8100/every1english/` 是通的 | 安全组没放行,或者你输入的是内网 IP,或者你所在网络本身限制非常规端口出站 | 检查第 2.2 节的安全组规则,确认用的是公网 IP;如果规则没问题但换个网络(比如手机热点)就通,大概率是本地网络出口限制,直接改用第 8 节的域名地址访问,不依赖 8100 端口 |
+| 访问 `http://<IP>:8100/`(裸根路径,没带 `/every1english/`)返回 404 | 应用配了 `app.baseURL: '/every1english/'`,这是预期行为,不是 bug | 带上路径访问,或者直接用第 8 节配好的域名地址 |
 
 ---
 
-## 8. 回滚
+## 8. 用已有域名 + Nginx 反向代理对外访问(替代直连 8100)
+
+> ⚠️ **8100 直连现在打不通了**:本节配好之后,`1000h-portal` 的 `app.baseURL` 被设成了 `/every1english/`,应用只认带这个前缀的路径。前面第 3/5/7 节里"直接 `curl http://<IP>:8100`"这类验证方法**已经不适用**——裸根路径会 404,这是预期行为,不是部署坏了。真正的访问方式是本节这个域名地址,8100 只保留作服务器内部调试用,要测也得带上路径:`curl http://localhost:8100/every1english/`。
+
+### 8.1 为什么要做这一层
+
+8100 这种非标准端口很容易被公司/校园网络的出口防火墙拦截(实测过,见前面章节),而且如果以后每加一个新服务就配一个新端口、或者每次都新注册一个域名 + 申请一张证书,DuckDNS 免费账号很快就不够用(上限 5 个),也是重复劳动。更省心的做法是:**复用已有的 HTTPS 域名和 nginx,新服务只占用一个新的路径**。
+
+这台服务器上已经跑着 huaxia-qiji,它自己的 nginx 用 `xue5ya.duckdns.org` 提供 HTTPS 服务。这次新注册了一个专门给"其它小项目"用的域名 `5ways.duckdns.org`,让同一个 nginx 按路径分流,最终地址是：
+
+```
+https://5ways.duckdns.org/every1english/
+```
+
+以后再加新服务,只需要重复第 8.4 步(加一个新 `location`),不需要再走 8.2/8.3 注册域名和申请证书。
+
+### 8.2 注册一个新的 DuckDNS 域名(仅第一次需要)
+
+去 [duckdns.org](https://www.duckdns.org) 登录,注册一个新的子域名(比如这次用的 `5ways`),指向这台服务器的公网 IP。DuckDNS 免费账号最多 5 个域名,建议专门留一个当"其它小项目的统一入口",不要每个服务都单独注册一个。
+
+如果服务器上已经有 DuckDNS 自动更新脚本(检查 `~/duckdns/duck.sh`),把新域名加进同一个更新请求里,不用再新建一份：
+
+```bash
+# duck.sh 里 domains 参数改成逗号分隔多个域名,例如:
+# domains=xue5ya.duckdns.org,5ways.duckdns.org
+
+bash ~/duckdns/duck.sh   # 手动跑一次立刻生效,不用等下一次定时任务
+dig +short 5ways.duckdns.org   # 确认解析到的是服务器公网 IP,不是别的
+```
+
+### 8.3 申请证书:用 DNS 验证,不要用 standalone
+
+服务器上如果已经有证书是用 `standalone` 方式申请的(`sudo certbot certificates` 能看到 `authenticator = standalone`),说明申请/续期都需要临时占用 80 端口——对已经在跑其他网站的 nginx 不友好,续期时如果没配自动停启 nginx 的钩子,大概率会静默失败。新域名建议用 **DNS 验证**,全程不用碰 nginx/80 端口：
+
+```bash
+# 认证钩子:把 CERTBOT_VALIDATION 的值通过 DuckDNS 的 TXT 更新接口写进去
+cat > ~/duckdns/certbot-auth-hook.sh << 'EOF'
+#!/bin/bash
+set -e
+TOKEN="你的DuckDNS token"
+curl -s "https://www.duckdns.org/update?domains=5ways&token=${TOKEN}&txt=${CERTBOT_VALIDATION}"
+sleep 30   # 等 DNS 传播,不然验证会因为记录还没生效而失败
+EOF
+
+# 清理钩子:验证完把 TXT 记录清掉
+cat > ~/duckdns/certbot-cleanup-hook.sh << 'EOF'
+#!/bin/bash
+TOKEN="你的DuckDNS token"
+curl -s "https://www.duckdns.org/update?domains=5ways&token=${TOKEN}&txt=removed&clear=true"
+EOF
+
+chmod +x ~/duckdns/certbot-*.sh
+
+sudo certbot certonly --manual --preferred-challenges dns \
+  --manual-auth-hook /home/ubuntu/duckdns/certbot-auth-hook.sh \
+  --manual-cleanup-hook /home/ubuntu/duckdns/certbot-cleanup-hook.sh \
+  -d 5ways.duckdns.org \
+  --non-interactive --agree-tos
+```
+
+证书会落在 `/etc/letsencrypt/live/5ways.duckdns.org/`,而且续期时会自动复用这两个钩子,以后也不用停 nginx。
+
+### 8.4 改 nginx:新增一个按路径分流的 server 块
+
+这一步改的是服务器上 `~/huaxia-qiji/nginx.conf`(公共基础设施,不在这个仓库的版本控制范围内)。**先备份**再改：
+
+```bash
+cp ~/huaxia-qiji/nginx.conf ~/huaxia-qiji/config-backups/nginx.conf.$(date +%Y%m%d_%H%M%S).bak
+```
+
+在 `http {}` 块里新增(**不要动**已有域名的 server 块)：
+
+```nginx
+server {
+    listen 80;
+    server_name 5ways.duckdns.org;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name 5ways.duckdns.org;
+
+    ssl_certificate     /etc/nginx/cert/5ways-fullchain.pem;
+    ssl_certificate_key /etc/nginx/cert/5ways-privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+
+    location /every1english/ {
+        proxy_pass http://1000h-portal:3000;   # 注意结尾不带斜杠,原因见下面踩坑记录
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+
+    # 以后加新服务,在这里再加一个 location 块就行
+}
+```
+
+nginx 容器的 `docker-compose.yml` 也要加上新证书文件的挂载(照抄已有 `xue5ya` 那两行的写法,换成 `5ways` 的路径)。
+
+**改完先在隔离的临时容器里验证语法,别直接套到正式的 nginx 上**(这一步必须把测试容器接到和 nginx 相同的 Docker 网络,不然会因为解析不到 `backend`/`1000h-portal` 这些容器名而报误报的错误)：
+
+```bash
+docker run --rm \
+  --network huaxia-qiji_huaxia_network_dev \
+  -v ~/huaxia-qiji/nginx.conf:/etc/nginx/nginx.conf:ro \
+  -v /etc/letsencrypt/live/xue5ya.duckdns.org/fullchain.pem:/etc/nginx/cert/fullchain.pem:ro \
+  -v /etc/letsencrypt/live/xue5ya.duckdns.org/privkey.pem:/etc/nginx/cert/privkey.pem:ro \
+  -v /etc/letsencrypt/live/5ways.duckdns.org/fullchain.pem:/etc/nginx/cert/5ways-fullchain.pem:ro \
+  -v /etc/letsencrypt/live/5ways.duckdns.org/privkey.pem:/etc/nginx/cert/5ways-privkey.pem:ro \
+  nginx:alpine nginx -t
+
+# 语法 OK 之后再应用(只会重建 nginx 这一个容器,其它服务不受影响):
+cd ~/huaxia-qiji && docker compose up -d nginx
+```
+
+### 8.5 让目标应用的容器加入 nginx 所在的网络
+
+nginx 是按**容器名**转发的(`proxy_pass http://1000h-portal:3000;`),前提是目标容器和 nginx 在同一个 Docker 网络里。这一步**必须写进目标应用自己的 `docker-compose.yml`**,不能只在服务器上手动 `docker network connect` 一次——手动加的网络关系扛不住下一次自动部署,具体原因见下面的踩坑记录。写法参考本仓库的 `1000h-portal/deploy/docker-compose.yml`：
+
+```yaml
+services:
+  portal:
+    # ...其它配置不变...
+    networks:
+      - default
+      - shared-nginx
+
+networks:
+  default: {}
+  shared-nginx:
+    external: true
+    name: huaxia-qiji_huaxia_network_dev   # 换成实际的网络名,用 `docker network ls` 查
+```
+
+### 踩过的两个坑(真实发生过,留着当反面教材)
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| 手动 `docker network connect` 接好网络后,下一次自动部署(push 触发 CI/CD)一跑,nginx 疯狂重启,日志报 `host not found in upstream "1000h-portal"` | `docker compose up -d` 重建容器时,只认容器自己 compose 文件里声明的网络,不知道有一条手动加的网络关系,重建的新容器就把这层连接丢了 | 把这层网络关系写进目标应用的 `docker-compose.yml`(见 8.5),让它成为每次部署都会被应用的"永久配置",而不是一次性的手动操作 |
+| nginx 配置改成按路径转发之后,访问 `/every1english/` 应用返回的是 Nuxt 自己的 404 页面(不是 nginx 层面的错误) | Nuxt 配了 `app.baseURL: '/every1english/'` 之后,应用**期望收到的请求路径里带着这个前缀**去做内部路由匹配;但 nginx 的 `proxy_pass http://1000h-portal:3000/;`(结尾带斜杠)会把这个前缀转发前**剥掉**,导致应用收到的是不带前缀的路径,匹配不到任何路由 | 把 `proxy_pass` 结尾的 `/` 去掉,变成 `proxy_pass http://1000h-portal:3000;`(不带斜杠),nginx 就会把请求原始路径(含 `/every1english/` 前缀)原样转发给应用,交给应用自己按 `baseURL` 内部处理 |
+
+这两个坑本质上是同一类问题的两种表现:**"手动在服务器上改了一下、看着好使了"和"这个改动能不能扛住下一次自动化部署/配置变更"是两回事**,验证的时候一定要连着"再触发一次真实的自动部署"一起测,不能改完手动测一次就当结束了。
+
+---
+
+## 9. 回滚
 
 因为每次部署都会打一个不可变的 `1000h-portal-<sha>` tag,回滚不需要重新跑 CI,直接手动改服务器上跑的 tag 就行：
 
@@ -301,36 +454,9 @@ docker compose up -d
 
 ---
 
-## 8.5 最终访问地址:和 huaxia-qiji 共用一个域名、按路径分流
+## 10. 学明白之后可以自己练的进阶方向
 
-8100 那个端口一开始是为了绕开"公司网络不让访问非常规端口"这个问题,但更彻底的解法是接到已有的 HTTPS 域名上,所以最终线上正式地址是：
-
-```
-https://5ways.duckdns.org/every1english/
-```
-
-`5ways.duckdns.org` 是专门给"huaxia-qiji 之外的其它小项目"用的统一入口,不是 1000h-portal 独占的域名——以后再加新服务,只需要在服务器的 `~/huaxia-qiji/nginx.conf` 里新增一个 `location` 路径块,不需要再注册新域名、再申请新证书。8100 端口现在仍然保留着(方便本机/服务器内部直接测试),但对外应该用上面这个域名访问。
-
-这一步涉及到的改动都不在这个仓库里能看到(nginx 是 huaxia-qiji 那台服务器上的公共基础设施,配置文件在服务器上,不在 `everyone-english` 这个仓库的版本控制范围内),记录一下方便以后排查：
-
-- 服务器上 `~/huaxia-qiji/nginx.conf` 新增了 `5ways.duckdns.org` 的 80跳转 + 443 SSL 两个 `server` 块,`xue5ya.duckdns.org` 原有的配置块完全没动。
-- 证书是用 **DNS 验证**(不是 huaxia-qiji 当初用的 standalone 方式)申请的,好处是申请/续期全程不需要占用 80 端口、不需要停 nginx。对应的钩子脚本在服务器的 `~/duckdns/certbot-auth-hook.sh` / `certbot-cleanup-hook.sh`,复用了 `~/duckdns/duck.sh` 里已有的 DuckDNS token。
-- `1000h-portal` 容器接入了 huaxia-qiji 的 Docker 网络(`huaxia-qiji_huaxia_network_dev`),这样 nginx 才能直接用容器名 `1000h-portal` 访问到它——这层网络关系写在了本仓库 `1000h-portal/deploy/docker-compose.yml` 的 `networks` 配置里(见下面"踩过的坑"第一条,为什么必须写在这里而不是手动 `docker network connect` 一次就完事)。
-
-### 踩过的两个坑(真实发生过,留着当反面教材)
-
-| 现象 | 根因 | 修法 |
-|---|---|---|
-| 手动 `docker network connect` 接好网络后,下一次自动部署(push 触发 CI/CD)一跑,nginx 疯狂重启,日志报 `host not found in upstream "1000h-portal"` | `docker compose up -d` 重建容器时,只认容器自己 compose 文件里声明的网络,不知道有一条手动加的网络关系,重建的新容器就把这层连接丢了 | 把这层网络关系**写进 `1000h-portal/deploy/docker-compose.yml` 的 `networks` 里**(声明成 `external: true` 指向 huaxia-qiji 那个真实网络名),让它成为每次部署都会被应用的"永久配置",而不是一次性的手动操作 |
-| nginx 配置改成按路径转发之后,访问 `/every1english/` 应用返回的是 Nuxt 自己的 404 页面(不是 nginx 层面的错误) | Nuxt 配了 `app.baseURL: '/every1english/'` 之后,应用**期望收到的请求路径里带着这个前缀**去做内部路由匹配;但 nginx 的 `proxy_pass http://1000h-portal:3000/;`(结尾带斜杠)会把这个前缀转发前**剥掉**,导致应用收到的是不带前缀的路径,匹配不到任何路由 | 把 `proxy_pass` 结尾的 `/` 去掉,变成 `proxy_pass http://1000h-portal:3000;`(不带斜杠),nginx 就会把请求原始路径(含 `/every1english/` 前缀)原样转发给应用,交给应用自己按 `baseURL` 内部处理 |
-
-这两个坑本质上是同一类问题的两种表现:**"手动在服务器上改了一下、看着好使了"和"这个改动能不能扛住下一次自动化部署/配置变更"是两回事**,验证的时候一定要连着"再触发一次真实的自动部署"一起测,不能改完手动测一次就当结束了。
-
----
-
-## 9. 学明白之后可以自己练的进阶方向
-
-- ~~加一层 Nginx 反向代理 + HTTPS~~ **已完成**,见第 8.5 节:复用 huaxia-qiji 现有的 nginx,新增了 `5ways.duckdns.org` 这个域名按路径分流,`1000h-portal` 落在 `/every1english/` 这个路径下,证书用 DNS 验证申请、不占 80 端口。以后再加新服务,照着同样的模式在 nginx 里加一个新 `location` 路径就行,不用再申请新域名/新证书——这个"一个域名多路径"的模式已经是这台服务器上的既定架构,可以直接复用。
+- ~~加一层 Nginx 反向代理 + HTTPS~~ **已完成**,见第 8 节:复用 huaxia-qiji 现有的 nginx,新增了 `5ways.duckdns.org` 这个域名按路径分流,`1000h-portal` 落在 `/every1english/` 这个路径下,证书用 DNS 验证申请、不占 80 端口。以后再加新服务,照着同样的模式在 nginx 里加一个新 `location` 路径就行,不用再申请新域名/新证书——这个"一个域名多路径"的模式已经是这台服务器上的既定架构,可以直接复用。
 - **多环境(staging / production)**:复制一份 workflow,加一个 staging 分支触发部署到另一台测试服务器,验证没问题再手动 approve 部署到生产。GitHub Actions 的 `environment` + 保护规则(需要人工审批)可以练一下。
 - **零停机 / 蓝绿部署**:现在 `docker compose up -d` 重启容器的瞬间会有几秒钟服务不可用,可以研究一下怎么先起新容器、健康检查通过后再切流量、最后再关旧容器。
 - **告警**:部署失败时通过钉钉机器人/Slack/邮件通知自己,而不是要主动去 Actions 页面看。
